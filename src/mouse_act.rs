@@ -10,8 +10,9 @@
 //! 而 WinUHid 键盘不带。所以如果以后加"忽略自己产生的事件"，鼠标和键盘要分开判。
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
 };
 
 pub const ACT_LEFT: i32 = -1;
@@ -34,6 +35,8 @@ pub fn action_name(act: i32) -> &'static str {
         ACT_SWITCH_GROUP => "切换配置组",
         ACT_CLICK_ICON => "截图点击",
         ACT_TEXT_WHEEL => "文本轮盘",
+        ACT_PAGE_UP => "场景翻页↑",
+        ACT_PAGE_DOWN => "场景翻页↓",
         _ => "未知动作",
     }
 }
@@ -103,6 +106,65 @@ pub fn fire(act: i32, down: bool) -> bool {
         ACT_SWITCH_GROUP => true,
         // 截图点击需要模板匹配，原生版还没有 —— 认领但不动作，避免漏成键盘键
         ACT_CLICK_ICON => true,
+        // 场景翻页：由 backend 查当前激活场景的 page_region 后调 page_scroll，
+        // 这里只认领，防止漏成键盘键。
+        ACT_PAGE_UP | ACT_PAGE_DOWN => true,
         _ => false,
     }
+}
+
+// ── 场景自动化原语（2026-11-20）──
+
+/// 场景翻页动作值：上/下。与鼠标动作同段（-1..-6）延续，取 -7/-8。
+/// 具体翻哪、在哪翻，由 backend 查当前激活场景的 page_region 决定。
+pub const ACT_PAGE_UP: i32 = -7;
+pub const ACT_PAGE_DOWN: i32 = -8;
+
+/// 绝对坐标移动（虚拟桌面）。
+///
+/// ★ 必须带 MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK：
+///   这台机器是 2560x1440 扩展桌面，缺 VIRTUALDESK 会把坐标夹到主屏 ⇒ 点到错误位置
+///   （C# 版踩过同一个坑，见 MouseInjector.MoveAbsolute）。
+fn move_abs(x: i32, y: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN};
+    unsafe {
+        // Windows 约定：ABSOLUTE 坐标归一化到 0..65535，映射到整个虚拟桌面。
+        let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
+        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+        let nx = ((x - vx) as i64 * 65535 / vw as i64).clamp(0, 65535) as i32;
+        let ny = ((y - vy) as i64 * 65535 / vh as i64).clamp(0, 65535) as i32;
+        let inp = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: nx,
+                    dy: ny,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let _ = SendInput(&[inp], std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// 在虚拟桌面绝对坐标点一下（用于自动聚焦输入框）。
+pub fn click_at(x: i32, y: i32) {
+    move_abs(x, y);
+    std::thread::sleep(std::time::Duration::from_millis(30)); // 让移动先落地，否则点击落在旧位置
+    send_mouse(MOUSEEVENTF_LEFTDOWN.0, 0);
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    send_mouse(MOUSEEVENTF_LEFTUP.0, 0);
+}
+
+/// 在虚拟桌面绝对坐标处滚一格（up=true 向上）。用于场景翻页。
+pub fn scroll_at(x: i32, y: i32, up: bool) {
+    move_abs(x, y);
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    send_mouse(MOUSEEVENTF_WHEEL.0, if up { 120 } else { -120 });
 }

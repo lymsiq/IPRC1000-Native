@@ -26,7 +26,7 @@ use eframe::egui;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, Ordering};
 
 /// 窗口边长（也是裁圆的直径）。轮盘直径比它小 12px，留一圈边当描边。
-pub const WINDOW_SIZE: f32 = 330.0;
+pub const WINDOW_SIZE: f32 = 250.0;
 
 static OPEN: AtomicBool = AtomicBool::new(false);
 static CUT_DONE: AtomicBool = AtomicBool::new(false);
@@ -52,22 +52,27 @@ pub fn show(ctx: &egui::Context) {
     ctx.request_repaint_after(std::time::Duration::from_millis(33));
 
     // 文本只在打开时取一次，别在每帧绘制里反复加锁 + clone
-    let labels: [String; 4] = std::array::from_fn(|i| match crate::text_slot::get(i as u32 + 1) {
-        Some(t) if !t.text.is_empty() => {
-            let total = t.text.chars().count();
-            let mut s: String = t.text.chars().take(10).collect();
-            if total > 10 {
-                s.push('…');
+    // ★ 场景常用语优先（2026-11-20）：当前激活场景配了这一格就用它，
+    //   否则回退全局 text_slot（没建场景时行为不变）。
+    let scene = crate::app_scenes::active_phrases();
+    let raw: [String; 4] = std::array::from_fn(|i| {
+        if let Some(ref p) = scene {
+            if let Some(t) = p.get(i) {
+                if !t.is_empty() { return t.clone(); }
             }
-            s
         }
-        _ => "未设置".to_string(),
+        crate::text_slot::get(i as u32 + 1)
+            .map(|t| t.text).unwrap_or_default()
     });
-    let empty: [bool; 4] = std::array::from_fn(|i| {
-        !crate::text_slot::get(i as u32 + 1)
-            .map(|t| !t.text.is_empty())
-            .unwrap_or(false)
+    let labels: [String; 4] = std::array::from_fn(|i| {
+        let t = &raw[i];
+        if t.is_empty() { return "未设置".to_string(); }
+        let total = t.chars().count();
+        let mut s: String = t.chars().take(10).collect();
+        if total > 10 { s.push('…'); }
+        s
     });
+    let empty: [bool; 4] = std::array::from_fn(|i| raw[i].is_empty());
 
     let (x, y) = crate::backend::text_wheel_pos().unwrap_or_else(|| {
         let (cx, cy) = screen_center();
@@ -161,8 +166,8 @@ fn draw(ui: &mut egui::Ui, labels: &[String; 4], empty: &[bool; 4]) {
     use egui::{Align2, Color32, FontId, Pos2, Shape, Stroke};
 
     let center = ui.max_rect().center();
-    let r_out = 156.0f32;
-    let r_in = 66.0f32;
+    let r_out = 117.0f32;
+    let r_in = 50.0f32;
     let p = ui.painter();
 
     p.circle_filled(center, r_out, Color32::from_rgb(30, 33, 38));
@@ -204,14 +209,14 @@ fn draw(ui: &mut egui::Ui, labels: &[String; 4], empty: &[bool; 4]) {
             at + egui::vec2(0.0, -18.0),
             Align2::CENTER_CENTER,
             format!("{}  {} 号", arrows[i as usize], i + 1),
-            FontId::proportional(18.0),
+            FontId::proportional(15.0),
             Color32::from_gray(220),
         );
         p.text(
             at + egui::vec2(0.0, 6.0),
             Align2::CENTER_CENTER,
             &labels[i as usize],
-            FontId::proportional(13.5),
+            FontId::proportional(12.0),
             if empty[i as usize] {
                 Color32::from_gray(118)
             } else {

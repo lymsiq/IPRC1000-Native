@@ -22,6 +22,7 @@ enum Tab {
     Ime,
     Text,
     Macro,
+    Scenes,
     Setup,
 }
 
@@ -48,6 +49,14 @@ pub struct App {
     hotkey_want: bool,
     /// 文本/宏页的状态
     pages: crate::ui_pages::PagesState,
+    /// APP 场景的新增/编辑弹窗
+    scene_edit: Option<crate::ui_scenes::SceneEdit>,
+    /// 本次 UI 重建只为显示文本轮盘（主窗口保持不可见，轮盘关了就再收起来）。
+    wheel_only: bool,
+    /// wheel_only 首帧诊断日志只打一次
+    wheel_dbg_logged: bool,
+
+
 }
 
 impl App {
@@ -80,6 +89,11 @@ impl App {
             hidden: false,
             hotkey_want: false,
             pages: crate::ui_pages::PagesState::default(),
+            scene_edit: None,
+            // 主循环在"仅弹轮盘"重建前置 WHEEL_ONLY_BOOT，这里读取并清掉（一次性）。
+            wheel_only: crate::WHEEL_ONLY_BOOT.swap(false, std::sync::atomic::Ordering::SeqCst),
+            wheel_dbg_logged: false,
+
         }
     }
 
@@ -134,6 +148,32 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 运行时文本轮盘（按键触发，独立置顶窗口；未激活时什么都不做）
         crate::ui_wheel::show(ctx);
+
+        // ★ 仅弹轮盘模式（2026-11-20）：托盘里按了轮盘键，主循环为此重建了 UI。
+        //   主窗口必须不可见（否则每按一次轮盘就弹一次主界面）；轮盘关闭后再次收进托盘。
+        if self.wheel_only {
+            // ★ 每帧确保（幂等）：winit 的窗口异步创建，首帧 HWND 可能还没好，
+            //   只做一次会漏 ⇒ 主窗口闪一下。重复发同样位置/alpha 无副作用。
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(-20000.0, -20000.0)));
+            crate::set_window_alpha(0);
+            self.hidden = true;
+            if !self.wheel_dbg_logged {
+                self.wheel_dbg_logged = true;
+                eprintln!("[轮盘] wheel_only 首帧：active={:?}", crate::backend::text_wheel_active());
+            }
+            // 轮盘还开着就继续刷帧（UI 线程只为它存在）
+            if crate::backend::text_wheel_active().is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+                return;
+            }
+            // 轮盘已关闭/取消 ⇒ 结束 UI 线程，回到托盘（省内存）
+            eprintln!("[i] 轮盘已收起 ⇒ 结束 UI 线程（仅轮盘模式）");
+            crate::HIDE_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        // UI 正常运行时，清掉可能残留的轮盘请求，避免收进托盘后立刻被它重建
+        crate::WHEEL_REQ.store(false, std::sync::atomic::Ordering::Relaxed);
 
         // 每帧确认"工具窗口"样式（winit 会覆盖，见 ensure_toolwindow 的说明）
         if !self.hidden {
@@ -277,6 +317,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tab, Tab::Ime, "输入法");
                 ui.selectable_value(&mut self.tab, Tab::Text, "文本");
                 ui.selectable_value(&mut self.tab, Tab::Macro, "宏");
+                ui.selectable_value(&mut self.tab, Tab::Scenes, "APP 场景");
                 ui.selectable_value(&mut self.tab, Tab::Setup, "环境与安装");
             });
             ui.add_space(4.0);
@@ -302,6 +343,11 @@ impl eframe::App for App {
                 Tab::Keys => self.keys_page(ui),
                 Tab::Ime => self.ime_page(ui),
                 Tab::Setup => self.setup_page(ui),
+                Tab::Scenes => {
+                    if let Some(m) = crate::ui_scenes::page(ui, &mut self.scene_edit) {
+                        self.say(m);
+                    }
+                }
                 // 文本/宏两页需要把 say 借出去（闭包），所以先把 toast 取出来
                 Tab::Text | Tab::Macro => {}
             }
@@ -333,6 +379,14 @@ impl eframe::App for App {
                     }
                     None => self.say("已取消"),
                 }
+            }
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
+
+        // APP 场景弹窗（内部保存/取消后自行清空 self.scene_edit）
+        if self.scene_edit.is_some() {
+            if let Some(m) = crate::ui_scenes::edit_window(ctx, &mut self.scene_edit) {
+                self.say(m);
             }
             ctx.request_repaint_after(Duration::from_millis(120));
         }
@@ -922,6 +976,7 @@ fn initial_tab() -> Tab {
                     "text" => Tab::Text,
                     "macro" => Tab::Macro,
                     "setup" => Tab::Setup,
+                    "scenes" => Tab::Scenes,
                     _ => Tab::Keys,
                 };
             }
@@ -1003,7 +1058,7 @@ fn binding_label(id: &str, usage: u8, mouse_group: bool) -> String {
                 if n == crate::mouse_act::ACT_TEXT_WHEEL as i64 {
                     return "文本轮盘（按下弹盘）".to_string();
                 }
-                if (-6..=-1).contains(&n) {
+                if (-8..=-1).contains(&n) {
                     return format!("{}（动作）", mouse_act::action_name(n as i32));
                 }
                 // 「打开程序」：-2001..-2999。不认这一段的话这里会掉到 vks_of（空）

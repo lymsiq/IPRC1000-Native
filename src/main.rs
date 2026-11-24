@@ -43,6 +43,9 @@ mod mouse_move;
 mod recorder;
 mod settings;
 mod shortcut_store;
+mod app_scenes;
+mod region_learn;
+mod scene_play;
 mod ui_win32;
 mod step;
 mod text_slot;
@@ -53,6 +56,8 @@ mod ui_wheel;
 mod ui_edit_win32;
 #[cfg(feature = "gui")]
 mod ui_egui;
+#[cfg(feature = "gui")]
+mod ui_scenes;
 #[cfg(feature = "gui")]
 mod ui_insert;
 mod uninstall;
@@ -116,10 +121,10 @@ pub fn apply_binding(id: &str, value: &str) -> String {
             return format!("无法解析动作：{v}");
         };
         // 三类负数值，语义完全不同（这也是不能简单"负数=动作"的原因）：
-        //   -1..-6        鼠标动作，交给 mouse_act
+        //   -1..-8        鼠标动作/场景动作，交给 mouse_act
         //   -1001..-1010  文本槽 1..10
         //   -1101..-1999  宏
-        if (-6..=-1).contains(&act) {
+        if (-8..=-1).contains(&act) {
             settings::set_binding_in_group(id, v);
             keymap::set_action(usage, Some(act as i32));
             keymap::set_override(usage, Vec::new());
@@ -394,6 +399,10 @@ fn main() {
             || a == "--bind-program"
             || a == "--hid-probe"
             || a == "--restore-keyboard"
+            || a == "--scene-selftest"
+            || a == "--scene-focus-test"
+            || a == "--keymap-dump"
+            || a == "--scene-detect"
     });
     if !is_cli_tool {
         redirect_stderr_to_file();
@@ -626,6 +635,69 @@ fn main() {
         std::process::exit(0);
     }
 
+    // 键位映射诊断（只读）：按真实配置加载后，打印每个键解析出的动作/键。
+    // 用途：验证"重启后绑定丢失"这类问题（如 -3000 文本轮盘曾漏解析）。
+    if std::env::args().any(|a| a == "--keymap-dump") {
+        settings::load();
+        let g = settings::active_group();
+        keymap::load_group(&settings::bindings_of(g));
+        eprintln!("当前配置组 {} 的按键解析：", g + 1);
+        for u in [0x0Au8, 0x08, 0x09, 0x11, 0x28, 0x52, 0x51, 0x50, 0x4F] {
+            let (id, label) = keymap::usage_label(u);
+            let act = keymap::action_of(u);
+            let vks = keymap::vks_of(u);
+            eprintln!("  0x{u:02X} {label:<8} id={id:<12} action={act:?} vks={vks:?}");
+        }
+        use std::io::Write as _;
+        let _ = std::io::stderr().flush();
+        std::process::exit(0);
+    }
+
+    // 前台场景识别诊断（只读）：打印当前前台窗口与匹配到的场景。
+    if std::env::args().any(|a| a == "--scene-detect") {
+        settings::load();
+        app_scenes::load();
+        eprintln!("{}", scene_play::describe_foreground());
+        let hit = scene_play::detect_scene_for_foreground();
+        eprintln!("前台窗口识别结果：{:?}", hit);
+        if let Some(n) = hit {
+            if let Some(s) = app_scenes::get(n) {
+                eprintln!("  ⇒ 场景「{}」#{}  phrases={:?}", s.name, s.num, s.phrases);
+            }
+        } else {
+            eprintln!("  ⇒ 未匹配任何场景（轮盘将回退全局文本槽）");
+        }
+        use std::io::Write as _;
+        let _ = std::io::stderr().flush();
+        std::process::exit(0);
+    }
+
+    // 场景锚点坐标诊断（只读，不点击）：验证窗口匹配 + 归一化→屏幕坐标
+    if let Some(i) = std::env::args().position(|a| a == "--scene-focus-test") {
+        let num: u32 = std::env::args().nth(i + 1).and_then(|v| v.parse().ok()).unwrap_or(1);
+        settings::load();
+        app_scenes::load();
+        eprintln!("{}", scene_play::probe(num));
+        use std::io::Write as _;
+        let _ = std::io::stderr().flush();
+        std::process::exit(0);
+    }
+
+    // APP 场景存储自检（无界面）：隔离到临时 HOME，不碰真实配置
+    if std::env::args().any(|a| a == "--scene-selftest") {
+        let tmp = std::env::temp_dir().join(format!("iprc-scene-selftest-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("IPRC1000_HOME", &tmp);
+        settings::load();
+        let report = app_scenes::self_test();
+        let _ = std::fs::remove_dir_all(&tmp);
+        eprintln!("{report}");
+        use std::io::Write as _;
+        let _ = std::io::stderr().flush();
+        let pass = report.contains("全部通过");
+        std::process::exit(if pass { 0 } else { 1 });
+    }
+
     if std::env::args().any(|a| a == "--diag") {
         eprintln!("{}", diag_report());
         use std::io::Write as _;
@@ -782,6 +854,7 @@ fn main() {
     //     否则升级到 0.4.34 的用户会发现键位/宏/话术全没了（其实是换了目录）。
     paths::migrate_legacy();
     settings::load();
+    app_scenes::load();
     macro_store::load();
     macro_store::migrate_split_both();   // 旧数据：合并的按下+弹起拆成独立步骤
     text_slot::load();
@@ -865,6 +938,27 @@ fn main() {
             });
         }
     }
+    // ★ 同性质的钩子：N 毫秒后自动开一次文本轮盘，验证"托盘里按轮盘键 ⇒
+    //   重建仅轮盘的 UI"这条真实按键才走到的路径（沙箱里没法按遥控器）。
+    //   ⚠ 同时认**哨兵文件**（与 IPRC_FORCE_GUI_FAIL 同模式）：经 explorer 代启时
+    //     环境变量传不进来，只有读文件才可靠。文件内是毫秒数，5 分钟内有效。
+    let test_wheel_ms: Option<u64> = std::env::var("IPRC_TEST_WHEEL_MS").ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| {
+            let p = std::env::temp_dir().join("iprc-test-wheel-ms");
+            let fresh = std::fs::metadata(&p).and_then(|m| m.modified())
+                .map(|t| t.elapsed().map(|d| d < std::time::Duration::from_secs(300)).unwrap_or(false))
+                .unwrap_or(false);
+            if !fresh { return None; }
+            std::fs::read_to_string(&p).ok().and_then(|s| s.trim().parse::<u64>().ok())
+        });
+    if let Some(ms) = test_wheel_ms {
+        eprintln!("[测试] {ms} ms 后自动开一次文本轮盘");
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            backend::debug_open_wheel();
+        });
+    }
     loop {
         round += 1;
         let opts2 = eframe::NativeOptions {
@@ -920,12 +1014,22 @@ fn main() {
             // ★ 同时丢弃隐藏之前积累的陈旧唤回信号：否则一关闭就立刻重建，
             //   表现成"点了关闭，窗口闪一下就回来了"。
             SHOW_REQ.store(false, Ordering::SeqCst);
-            // 两条唤回入口都认：托盘图标（SHOW_REQ）与"再双击一次 exe"（命名事件）。
-            // 后者在托盘图标失效（强杀留下的僵尸图标）时是唯一还活着的入口。
-            while !SHOW_REQ.swap(false, Ordering::SeqCst) && !show_event_fired() {
-                std::thread::sleep(std::time::Duration::from_millis(200));
+            // 三条入口：托盘图标（SHOW_REQ）、"再双击一次 exe"（命名事件）、
+            // 仅弹轮盘（WHEEL_REQ，主窗口保持隐藏）。
+            WHEEL_ONLY_BOOT.store(false, Ordering::SeqCst);
+            loop {
+                if SHOW_REQ.swap(false, Ordering::SeqCst) || show_event_fired() {
+                    eprintln!("[i] 收到唤回信号 ⇒ 重建界面");
+                    break;
+                }
+                if WHEEL_REQ.swap(false, Ordering::SeqCst) {
+                    // 只为轮盘重建：主窗口不显示（App 里 alpha=0 + 移出屏幕）
+                    WHEEL_ONLY_BOOT.store(true, Ordering::SeqCst);
+                    eprintln!("[i] 收到轮盘请求 ⇒ 重建界面（仅轮盘，不弹主窗）");
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(120));
             }
-            eprintln!("[i] 收到唤回信号 ⇒ 重建界面");
             continue;
         }
         let err_txt = format!("{r:?}");
@@ -952,6 +1056,8 @@ fn main() {
 /// 托盘请求"显示窗口"（UI 线程每帧检查；不能从托盘线程直接动 egui 的窗口）
 pub use hotkey::HIDE_REQUESTED;
 pub use hotkey::SHOW_REQ;
+pub use hotkey::WHEEL_ONLY_BOOT;
+pub use hotkey::WHEEL_REQ;
 
 
 fn chrono_like_now() -> String {

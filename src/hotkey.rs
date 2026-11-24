@@ -24,6 +24,18 @@ pub static SHOW_REQ: AtomicBool = AtomicBool::new(false);
 ///     false ⇒ 意外结束（GL 丢失/主题切换），2 秒后自动重建（保留原有健壮性）
 pub static HIDE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// 请求**仅显示文本轮盘**（2026-11-20）。
+///
+/// 问题：收进托盘后 UI 线程已结束，而轮盘是 egui 的 secondary viewport，
+///   没有 UI 事件循环就没有任何东西去画它 ⇒ 按了轮盘键"没反应"（真机复现）。
+/// 方案：按下轮盘键时置本标志；主循环看到后重建 UI，但**主窗口不显示**
+///   （alpha=0 + 移出屏幕），只挂轮盘；轮盘关闭后 UI 再次结束，回到托盘。
+/// 与 SHOW_REQ 分开，避免"弹轮盘"把主界面也弹出来。
+pub static WHEEL_REQ: AtomicBool = AtomicBool::new(false);
+
+/// 本次 UI 重建是不是"只为轮盘"（由主循环在重建前设置，App::new 读取后清掉）。
+pub static WHEEL_ONLY_BOOT: AtomicBool = AtomicBool::new(false);
+
 /// 是否**需要** F10 热键（只有宏页面开着时才需要）。
 /// 热键线程收到 `WM_APP_HOTKEY` 后按这个标志重新注册/注销。
 static WANT: AtomicBool = AtomicBool::new(false);

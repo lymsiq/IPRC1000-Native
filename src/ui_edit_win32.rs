@@ -87,6 +87,7 @@ const ROW_NAV: &[(&str, u16)] = &[
 const ROW_ACT: &[(&str, i32)] = &[
     ("切换配置组", -5), ("鼠标左键", -1), ("鼠标右键", -2),
     ("滚轮上", -3), ("滚轮下", -4),
+    ("场景翻页↑", -7), ("场景翻页↓", -8),
 ];
 
 /// 对话框状态（仅对话框线程访问）
@@ -230,7 +231,7 @@ pub unsafe fn show(parent: HWND, key_label: &str, current: &str) -> Option<Strin
     // 回填
     let cur = current.trim();
     if let Ok(n) = cur.parse::<i32>() {
-        if (-6..=-1).contains(&n) {
+        if (-8..=-1).contains(&n) {
             ST.action = n;
         } else if (-2999..=-2001).contains(&n) {
             // 「打开程序」绑定：本面板不编辑它，但要让用户知道当前是什么

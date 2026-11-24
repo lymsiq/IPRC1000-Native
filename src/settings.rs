@@ -374,6 +374,16 @@ pub fn device_name_hints() -> Vec<String> {
 
 // ── 配置组 ──
 
+/// 配置组名（界面/日志共用）。越界返回占位串，不 panic ——
+/// 场景持久化里存的是组下标，改配置删组后可能失效，不能让它拖垮启动。
+pub fn group_name(id: u8) -> String {
+    store()
+        .lock()
+        .ok()
+        .and_then(|d| d.groups.get(id as usize).map(|g| g.name.clone()))
+        .unwrap_or_else(|| format!("组 {}（已删除）", id + 1))
+}
+
 pub fn active_group() -> u8 {
     store().lock().map(|d| d.active_group).unwrap_or(0)
 }

@@ -677,25 +677,48 @@ pub fn text_wheel_pos() -> Option<(f32, f32)> {
     TW_POS.lock().ok().and_then(|g| *g)
 }
 
-/// 锚点：优先文本插入符（caret），拿不到用鼠标，再不行屏幕正中。
-/// 这样轮盘出现在用户正在输入的地方，而不是永远屏幕中央。
+/// 轮盘锚点（2026-11-20 改进）：
+///   1. **场景学过的输入框锚点**（最准 —— 真正"跟着输入框"）；
+///   2. 前台窗口的文本插入符 caret；
+///   3. 鼠标位置；
+///   4. 前台窗口所在显示器的中心。
+/// 边界用**前台窗口所在显示器的工作区**（多屏时不会把副屏的轮盘拉回主屏）。
 fn wheel_anchor(size: f32) -> (f32, f32) {
     #[cfg(target_os = "windows")]
     unsafe {
-        use windows::Win32::Foundation::POINT;
-        use windows::Win32::Graphics::Gdi::ClientToScreen;
+        use windows::Win32::Foundation::{POINT, RECT};
+        use windows::Win32::Graphics::Gdi::{ClientToScreen, GetMonitorInfoW, MonitorFromWindow,
+            MONITORINFO, MONITOR_DEFAULTTONEAREST};
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
-            GetSystemMetrics, GetWindowThreadProcessId, GUITHREADINFO, SM_CXSCREEN, SM_CYSCREEN,
+            GetCursorPos, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
+            GUITHREADINFO,
         };
-        let sw = GetSystemMetrics(SM_CXSCREEN) as f32;
-        let sh = GetSystemMetrics(SM_CYSCREEN) as f32;
-        let mut ax = sw / 2.0;
-        let mut ay = sh / 2.0;
-        let mut hit_caret = false;
 
         let fg = GetForegroundWindow();
+
+        // ── 显示器工作区（多屏正确性）──
+        let mut work = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
         if fg.0 != 0 {
+            let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+            let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                work = mi.rcWork;   // 排除任务栏
+            }
+        }
+
+        let mut ax = (work.left + work.right) as f32 / 2.0;
+        let mut ay = (work.top + work.bottom) as f32 / 2.0;
+        let mut hit = false;
+
+        // ① 场景输入框锚点（跟着输入框）
+        if let Some((x, y)) = crate::scene_play::active_input_anchor() {
+            ax = x as f32;
+            ay = y as f32;
+            hit = true;
+        }
+
+        // ② caret
+        if !hit && fg.0 != 0 {
             let tid = GetWindowThreadProcessId(fg, None);
             let mut gti = GUITHREADINFO::default();
             gti.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
@@ -704,20 +727,28 @@ fn wheel_anchor(size: f32) -> (f32, f32) {
                 if ClientToScreen(gti.hwndCaret, &mut pt).as_bool() {
                     ax = pt.x as f32;
                     ay = pt.y as f32 + 26.0;
-                    hit_caret = true;
+                    hit = true;
                 }
             }
         }
-        if !hit_caret {
+
+        // ③ 鼠标
+        if !hit {
             let mut p = POINT::default();
             if GetCursorPos(&mut p).is_ok() {
                 ax = p.x as f32;
                 ay = p.y as f32 + 26.0;
             }
         }
+
+        // X 以锚点为中心；Y **优先放在锚点上方**（不挡住输入框），上方不够才放下方。
         let half = size / 2.0;
-        let x = (ax - half).clamp(0.0, (sw - size).max(0.0));
-        let y = (ay - half).clamp(0.0, (sh - size).max(0.0));
+        let x = (ax - half).clamp(work.left as f32, (work.right as f32 - size).max(work.left as f32));
+        let mut y = ay - size - 16.0;
+        if y < work.top as f32 {
+            y = ay + 16.0;
+        }
+        let y = y.clamp(work.top as f32, (work.bottom as f32 - size).max(work.top as f32));
         (x, y)
     }
     #[cfg(not(target_os = "windows"))]
@@ -748,7 +779,29 @@ pub fn text_wheel_cancel() {
     }
 }
 
+/// 自测钩子：让外部（IPRC_TEST_WHEEL_MS）直接开一次轮盘，用来验证
+/// "收进托盘后按轮盘键能否重建 UI 并显示"这条只有真实按键才走到的路径。
+pub fn debug_open_wheel() {
+    text_wheel_open();
+}
+
 fn text_wheel_open() {
+    // ★ 先确认场景（2026-11-20）：按**当前前台窗口**判断用户此刻在哪个程序里，
+    //   弹出对应场景的 4 组常用语；而不是沿用"上次按启动键时的场景"（可能早切走了）。
+    //   匹配不到 ⇒ 清空激活场景 ⇒ 轮盘回退全局文本槽。
+    match crate::scene_play::detect_scene_for_foreground() {
+        Some(num) => {
+            crate::app_scenes::set_active(num);
+            let name = crate::app_scenes::get(num).map(|s| s.name).unwrap_or_default();
+            eprintln!("[轮盘] 按前台窗口识别到场景「{name}」(# {num})");
+        }
+        None => {
+            if crate::app_scenes::active() != 0 {
+                crate::app_scenes::clear_active();
+                eprintln!("[轮盘] 前台窗口不对应任何场景 ⇒ 使用全局文本槽");
+            }
+        }
+    }
     // 位置在打开瞬间定一次
     if let Ok(mut g) = TW_POS.lock() {
         *g = Some(wheel_anchor(crate::ui_wheel::WINDOW_SIZE));
@@ -756,19 +809,31 @@ fn text_wheel_open() {
     TW_SEL.store(0, Ordering::Relaxed);
     TW_UNTIL_MS.store(diag::now_ms() + 15_000, Ordering::Relaxed);
     TW_ON.store(true, Ordering::Relaxed);
+    // ★ 托盘模式下 UI 线程已结束 ⇒ 请主循环重建一个"仅轮盘"的 UI（不弹主窗口）。
+    //   UI 还活着时这标志会被 App::update 每帧清掉，不会触发重建。
+    crate::WHEEL_REQ.store(true, Ordering::SeqCst);
     eprintln!("[轮盘] 打开：↑=1 →=2 ↓=3 ←=4（按下即输入）· 返回取消");
 }
 
 /// OK 确认：把高亮那条文本打出去（复用文本槽的 Unicode 注入）。
+/// ★ 场景常用语优先（2026-11-20）：当前激活场景配了这一格就用它，
+///   否则回退全局 text_slot（保持没建场景时的原行为）。
 fn text_wheel_confirm() {
-    let sel = TW_SEL.load(Ordering::Relaxed) as u32 + 1;
+    let idx = TW_SEL.load(Ordering::Relaxed) as usize;
     TW_ON.store(false, Ordering::Relaxed);
-    match crate::text_slot::get(sel) {
-        Some(t) if !t.text.is_empty() => {
-            crate::macro_player::type_text_public(&t.text);
-            eprintln!("[轮盘] 输入槽 {sel}（{} 字）", t.text.chars().count());
-        }
-        _ => eprintln!("[轮盘] 槽 {sel} 是空的，没有输出（去「文本」页填内容）"),
+    let scene_text = crate::app_scenes::active_phrase(idx);
+    let (text, source): (String, &str) = match scene_text {
+        Some(t) => (t, "场景常用语"),
+        None => match crate::text_slot::get(idx as u32 + 1) {
+            Some(t) if !t.text.is_empty() => (t.text, "全局文本槽"),
+            _ => (String::new(), "全局文本槽"),
+        },
+    };
+    if !text.is_empty() {
+        crate::macro_player::type_text_public(&text);
+        eprintln!("[轮盘] 输入{source} #{}（{} 字）", idx + 1, text.chars().count());
+    } else {
+        eprintln!("[轮盘] 第 {} 格是空的，没有输出（在场景「常用语」或「文本」页填内容）", idx + 1);
     }
 }
 
@@ -1536,6 +1601,7 @@ impl Bridge {
         for u in 0..256usize {
             if now[u] && !self.held[u] {
                 // 绑到文本槽的键：直接把这串字打出去（Unicode 注入，绕过输入法）
+                // ★ 场景常用语走文本轮盘（-3000），不走这里；这里保持全局文本槽语义。
                 if let Some(slot) = text_slot_of(u as u8) {
                     if let Some(t) = crate::text_slot::get(slot) {
                         if !t.text.is_empty() {
@@ -1638,6 +1704,16 @@ impl Bridge {
                         self.arm_deadline(u);
                         continue;
                     }
+                    // ★ 场景翻页（2026-11-20）：上/下键绑成 ACT_PAGE_UP/DOWN 时，
+                    //   按当前激活场景学到的 page_region 在翻页区滚一格。
+                    //   窗口找不到 / 没学翻页区 ⇒ scene_play 留痕不动作（绝不误滚别处）。
+                    if act == crate::mouse_act::ACT_PAGE_UP || act == crate::mouse_act::ACT_PAGE_DOWN {
+                        // 这里是 DOWN handler（一次性动作，按下即滚一格；抬起由 fire(false) 认领不动作）
+                        crate::scene_play::page_scroll(act == crate::mouse_act::ACT_PAGE_UP);
+                        self.held[u] = true;
+                        self.arm_deadline(u);
+                        continue;
+                    }
                     // 「打开程序」：单独一段动作值，启动放子线程（ShellExecute 会阻塞）
                     if let Some(num) = crate::shortcut_store::num_of_action(act as i64) {
                         std::thread::spawn(move || {
@@ -1645,6 +1721,34 @@ impl Bridge {
                                 eprintln!("[打开] {e}");
                             }
                         });
+                        // ★ APP 场景（P0）：这个启动项若属于某场景，自动切到它绑定的配置组。
+                        //   判据是"启动项编号"（绑定值里存的那个数），不猜窗口、不等程序起来 ——
+                        //   "按键→切组"是确定事件，程序起不起得来不影响键位该切。
+                        //   静默跳过也留痕：没建场景时打一条，别让人以为功能坏了。
+                        if let Some(scene) = crate::app_scenes::find_by_shortcut(num) {
+                            let g = scene.group;
+                            let n = crate::settings::groups_ui().len() as u8;
+                            if g < n {
+                                self.release_all_held();
+                                crate::settings::set_active_group(g);
+                                crate::keymap::load_group(&crate::settings::bindings_of(g));
+                                eprintln!("[场景] {}", crate::app_scenes::activation_note(scene.num));
+                                // ★ 记住当前激活场景（翻页动作要查它的 page_region）
+                                crate::app_scenes::set_active(scene.num);
+                                // ★ 自动聚焦输入框：起后台线程等目标窗口出现再点（不盲点）
+                                let _ = crate::scene_play::focus_input(scene.num);
+                            } else {
+                                // 场景存了已删除的组 —— 不切、留痕（与 group_name 的"已删除"一致）
+                                eprintln!(
+                                    "[场景] 场景「{}」指向配置组 {}（已不存在），跳过切组",
+                                    scene.name, g + 1
+                                );
+                                crate::app_scenes::clear_active();
+                            }
+                        } else {
+                            eprintln!("[场景] 启动项 #{num} 未关联任何场景，保持当前配置组");
+                            crate::app_scenes::clear_active();
+                        }
                         self.held[u] = true;
                         self.arm_deadline(u);
                         {

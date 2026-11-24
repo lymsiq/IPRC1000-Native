@@ -163,7 +163,7 @@ fn map_text(u: u8) -> String {
         if let Ok(v) = b.trim().parse::<i64>() {
             if v < 0 {
                 return match v {
-                    -6..=-1 => String::from("鼠标动作"),
+                    -8..=-1 => String::from("鼠标动作"),
                     -2999..=-2001 => crate::shortcut_store::label((-2000 - v) as u32),
                     -1010..=-1001 => format!("文本槽 {}", -1000 - v),
                     -1999..=-1101 => format!("宏 {}", -1100 - v),

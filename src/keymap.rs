@@ -245,6 +245,29 @@ mod tests {
         assert_ne!(usage_of(0x08), Some(0x09), "绝不能落到字母 f 的 usage 上");
     }
 
+    /// 绑定值 → 动作值：把四类区间全部钉死（2026-11-20 真机事故：
+    /// `mute:"-3000"` 因漏解析在启动时被丢弃，文本轮盘永远弹不出来）。
+    #[test]
+    fn action_value_covers_all_ranges() {
+        // 文本轮盘（这次修的就是它）
+        assert_eq!(parse_action_value("-3000"), Some(-3000));
+        // 鼠标动作 + 场景翻页 -1..-8
+        assert_eq!(parse_action_value("-1"), Some(-1));   // 左键
+        assert_eq!(parse_action_value("-7"), Some(-7));   // 场景翻页↑
+        assert_eq!(parse_action_value("-8"), Some(-8));   // 场景翻页↓
+        // 打开程序 -2001..-2999
+        assert_eq!(parse_action_value("-2001"), Some(-2001));
+        assert_eq!(parse_action_value("-2999"), Some(-2999));
+        // 带空格也要认
+        assert_eq!(parse_action_value("  -3000 "), Some(-3000));
+        // 非动作（单个 VK / 文本槽 / 宏 / 乱码）不能当动作
+        assert_eq!(parse_action_value("83"), None);        // 单个 VK
+        assert_eq!(parse_action_value("17,83"), None);     // 组合键
+        assert_eq!(parse_action_value("-1001"), None);     // 文本槽（另有路径处理）
+        assert_eq!(parse_action_value("-1101"), None);     // 宏
+        assert_eq!(parse_action_value("abc"), None);
+    }
+
     /// 方向键：这些是**巧合对上**的键，同样要用测试钉住，避免以后改表改错。
     #[test]
     fn arrows_and_enter() {
@@ -344,14 +367,30 @@ pub fn load_group(map: &std::collections::HashMap<String, String>) {
         //   （"17,83" 因为有逗号解析失败才侥幸走对分支）。
         //   这个坑很隐蔽：改完当场生效（apply_binding 里设了 override），
         //   一重启就没了，而界面上显示的绑定串还是对的。
-        if let Ok(act) = v.parse::<i32>() {
-            if (-6..=-1).contains(&act) || (-2999..=-2001).contains(&act) {
-                set_action(u, Some(act));
-                continue;
-            }
+        if let Some(act) = parse_action_value(v) {
+            set_action(u, Some(act));
+            continue;
         }
         let vks: Vec<u16> = v.split(',').filter_map(|x| x.trim().parse::<u16>().ok()).collect();
         set_override(u, vks);
+    }
+}
+
+/// 绑定值 → 动作值。只认四类"确实是动作"的负数区间，其余（含单个 VK 如 "83"）返回 None。
+///
+/// ★ 2026-11-20 修：原来内联判断是 `(-6..=-1) | (-2999..=-2001)`，
+///   **漏了 -3000（文本轮盘）** ⇒ 配置里 `mute:"-3000"` 启动加载时被丢弃，
+///   静音键退化成普通键盘键、轮盘永远弹不出来（"改完当场生效、一重启就没了"那类坑）。
+///   抽成纯函数是为了能用单测把这四类区间钉死，避免下次再漏。
+pub fn parse_action_value(v: &str) -> Option<i32> {
+    let act = v.trim().parse::<i32>().ok()?;
+    if (-8..=-1).contains(&act)              // 鼠标动作 + 场景翻页
+        || act == crate::mouse_act::ACT_TEXT_WHEEL   // -3000 文本轮盘
+        || (-2999..=-2001).contains(&act)            // 打开程序
+    {
+        Some(act)
+    } else {
+        None
     }
 }
 
