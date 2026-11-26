@@ -672,6 +672,14 @@ fn main() {
                 Ok(n) => eprintln!("[桌宠] 已结束 {n} 个进程"),
                 Err(e) => eprintln!("[桌宠] {e}"),
             },
+            "tray-hide" => match pet::hide_tray_icon() {
+                Ok(n) => eprintln!("[桌宠] 图标已收进溢出区（{n} 项）"),
+                Err(e) => eprintln!("[桌宠] {e}"),
+            },
+            "tray-show" => match pet::show_tray_icon() {
+                Ok(n) => eprintln!("[桌宠] 图标已放回任务栏（{n} 项）"),
+                Err(e) => eprintln!("[桌宠] {e}"),
+            },
             _ => {
                 eprintln!("[桌宠] {}", if pet::is_running() { "运行中" } else { "未运行" });
                 eprintln!("  可执行文件：{:?}", pet::exe_path());
@@ -1383,6 +1391,18 @@ fn tray_thread() {
     use tray_icon::{Icon, TrayIconBuilder};
 
     let menu = Menu::new();
+    // ★ 桌宠是本系统的一个模块：上次开着就自动拉起，用户不必记两件事。
+    //   必须在建菜单项之前做完，菜单勾选态才如实。
+    if pet::load_enabled() && !pet::is_running() {
+        match pet::start_bound() {
+            Ok(true) => {
+                let _ = pet::hide_tray_icon();
+                eprintln!("[桌宠] 已按上次状态自动启动");
+            }
+            Ok(false) => eprintln!("[桌宠] 自动启动后未见进程"),
+            Err(e) => eprintln!("[桌宠] 自动启动失败：{e}"),
+        }
+    }
     let mi_show = MenuItem::new("打开界面", true, None);
     // ★ 勾选状态取自**注册表的真实值**，不是"我们记着点过"
     //   （用户可能从任务管理器 → 启动项 里禁掉，菜单要跟着反映）
@@ -1504,6 +1524,11 @@ fn tray_thread() {
             if ev.id == mi_quit.id() {
                 // exit() 不刷缓冲 ⇒ 日志最后几行会丢，排查时会误判成"莫名退出"
                 use std::io::Write as _;
+                // 桌宠是本系统的一部分：我们退了，它也不该留在桌面上
+                let n = pet::stop().unwrap_or(0);
+                if n > 0 {
+                    eprintln!("[桌宠] 随程序退出，已关闭 {n} 个进程");
+                }
                 eprintln!("[托盘] 用户点「退出」");
                 let _ = std::io::stderr().flush();
                 std::process::exit(0);
@@ -1534,11 +1559,28 @@ fn tray_thread() {
                         Ok(n) => eprintln!("[桌宠] 已关闭（结束 {n} 个进程）"),
                         Err(e) => eprintln!("[桌宠] 关闭失败：{e}"),
                     }
+                    pet::set_enabled(false);
                 } else {
-                    match pet::start() {
-                        Ok(true) => eprintln!("[桌宠] 已启动"),
-                        Ok(false) => eprintln!("[桌宠] 启动后未见进程（可能被安全软件拦截）"),
-                        Err(e) => eprintln!("[桌宠] {e}"),
+                    match pet::start_bound() {
+                        Ok(true) => {
+                            eprintln!("[桌宠] 已启动");
+                            // 先藏图标再启动已不行（图标由它注册），启动后立刻收进溢出区：
+                            // 任务栏只留本系统一个图标。
+                            match pet::hide_tray_icon() {
+                                Ok(n) if n > 0 => eprintln!("[桌宠] 图标已收进溢出区（{n} 项）"),
+                                Ok(_) => eprintln!("[桌宠] 未找到它的通知区记录"),
+                                Err(e) => eprintln!("[桌宠] 收图标失败：{e}"),
+                            }
+                            pet::set_enabled(true);
+                        }
+                        Ok(false) => {
+                            eprintln!("[桌宠] 启动后未见进程（可能被安全软件拦截）");
+                            pet::set_enabled(false);
+                        }
+                        Err(e) => {
+                            eprintln!("[桌宠] {e}");
+                            pet::set_enabled(false);
+                        }
                     }
                 }
                 // 用真实状态回填，不用"我们想设成什么"

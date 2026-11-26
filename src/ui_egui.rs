@@ -23,6 +23,7 @@ enum Tab {
     Text,
     Macro,
     Scenes,
+    Pet,
     Setup,
 }
 
@@ -318,6 +319,7 @@ impl eframe::App for App {
                 ui.selectable_value(&mut self.tab, Tab::Text, "文本");
                 ui.selectable_value(&mut self.tab, Tab::Macro, "宏");
                 ui.selectable_value(&mut self.tab, Tab::Scenes, "APP 场景");
+                ui.selectable_value(&mut self.tab, Tab::Pet, "桌宠");
                 ui.selectable_value(&mut self.tab, Tab::Setup, "环境与安装");
             });
             ui.add_space(4.0);
@@ -349,15 +351,16 @@ impl eframe::App for App {
                     }
                 }
                 // 文本/宏两页需要把 say 借出去（闭包），所以先把 toast 取出来
-                Tab::Text | Tab::Macro => {}
+                Tab::Text | Tab::Macro | Tab::Pet => {}
             }
-            if matches!(self.tab, Tab::Text | Tab::Macro) {
+            if matches!(self.tab, Tab::Text | Tab::Macro | Tab::Pet) {
                 let mut msg: Option<String> = None;
                 {
                     let mut say = |m: String| msg = Some(m);
                     match self.tab {
                         Tab::Text => crate::ui_pages::text_page(ui, &mut self.pages, &mut say),
                         Tab::Macro => crate::ui_pages::macro_page(ui, &mut self.pages, &mut say),
+                        Tab::Pet => crate::ui_pages::pet_page(ui, &mut say),
                         _ => {}
                     }
                 }
@@ -977,6 +980,7 @@ fn initial_tab() -> Tab {
                     "macro" => Tab::Macro,
                     "setup" => Tab::Setup,
                     "scenes" => Tab::Scenes,
+                    "pet" => Tab::Pet,
                     _ => Tab::Keys,
                 };
             }

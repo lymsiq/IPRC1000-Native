@@ -570,3 +570,93 @@ fn finish_pending(st: &mut PagesState, toast: &mut dyn FnMut(String)) {
         toast(m);
     }
 }
+
+/// 桌宠页（2026-11-26）
+///
+/// KuroCat 是**随本系统分发的一个模块**（MIT，C++ 单文件），由本程序启停：
+/// 不是让用户另装一个软件，也不会留下第二个托盘图标。
+pub fn pet_page(ui: &mut egui::Ui, toast: &mut dyn FnMut(String)) {
+    use egui::{Color32, RichText};
+
+    ui.add_space(4.0);
+    ui.label(RichText::new("桌宠（KuroCat）").strong());
+    ui.label(
+        RichText::new("随本程序一起分发，由本程序启停；关掉本程序它也会关。托盘右键「桌宠」是同一个开关。")
+            .small()
+            .weak(),
+    );
+    ui.add_space(10.0);
+
+    let running = crate::pet::is_running();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("状态").strong());
+        if running {
+            ui.label(RichText::new("● 运行中").color(Color32::from_rgb(96, 200, 130)));
+        } else {
+            ui.label(RichText::new("○ 未运行").color(Color32::from_gray(140)));
+        }
+        if crate::pet::load_enabled() {
+            ui.label(RichText::new("（随程序自动启动）").small().weak());
+        }
+    });
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if running {
+            if ui.button("关闭桌宠").clicked() {
+                match crate::pet::stop() {
+                    Ok(n) => {
+                        crate::pet::set_enabled(false);
+                        toast(format!("桌宠已关闭（{n} 个进程）"));
+                    }
+                    Err(e) => toast(format!("关闭失败：{e}")),
+                }
+            }
+        } else if ui.button("启动桌宠").clicked() {
+            match crate::pet::start_bound() {
+                Ok(true) => {
+                    // 只留一个任务栏图标：把它收进溢出区（点 ^ 可见）
+                    let _ = crate::pet::hide_tray_icon();
+                    crate::pet::set_enabled(true);
+                    toast("桌宠已启动".into());
+                }
+                Ok(false) => toast("启动后未见进程（可能被安全软件拦截）".into()),
+                Err(e) => toast(e),
+            }
+        }
+        if ui.button("打开它的文件夹").clicked() {
+            match crate::pet::exe_path() {
+                Some(p) => {
+                    if let Some(d) = p.parent() {
+                        let _ = std::process::Command::new("explorer.exe").arg(d).spawn();
+                    }
+                }
+                None => toast("找不到 assets/pet/".into()),
+            }
+        }
+    });
+
+    ui.add_space(14.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.label(RichText::new("跟遥控器的联动（自动，不用设置）").strong());
+    ui.label(
+        RichText::new(
+            "遥控器按键 → 本程序注入为虚拟键盘（等同真实键盘）→ 桌宠直接看到，猫会动。\n\
+             按住语音键（注入右 Alt）也会被它看到。",
+        )
+        .small(),
+    );
+    ui.add_space(6.0);
+    ui.label(RichText::new("它看不到的").strong());
+    ui.label(
+        RichText::new("纯鼠标动作、滚轮 —— 桌宠只抓键盘。").small().weak(),
+    );
+    ui.add_space(6.0);
+    ui.label(RichText::new("皮肤 / 大小 / 鼠标穿透").strong());
+    ui.label(
+        RichText::new("在桌宠自己的右键菜单里设，本程序不管这些（避免两套设置打架）。")
+            .small()
+            .weak(),
+    );
+}
