@@ -1488,7 +1488,18 @@ fn tray_thread() {
     }
 
     let rx = tray_icon::menu::MenuEvent::receiver();
+    // ★ 桌宠勾选要**持续跟着真实状态**（2026-11-26 真机：关了还在打勾）。
+    //   CheckMenuItem 的勾是持久的，只在 set_checked 时变；而用户可能从「桌宠」页面
+    //   开关、也可能别处把猫杀了。这里 100 ms 对一次账，菜单永远显示实况。
+    let mut pet_checked = pet::is_running();
     loop {
+        {
+            let real = pet::is_running();
+            if real != pet_checked {
+                pet_checked = real;
+                mi_pet.set_checked(real);
+            }
+        }
         // 泵一轮窗口消息（托盘窗口的消息都在这里）
         unsafe {
             let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
@@ -1584,7 +1595,8 @@ fn tray_thread() {
                     }
                 }
                 // 用真实状态回填，不用"我们想设成什么"
-                mi_pet.set_checked(pet::is_running());
+                pet_checked = pet::is_running();
+                mi_pet.set_checked(pet_checked);
             }
             if ev.id == mi_cable.id() {
                 std::thread::spawn(|| {

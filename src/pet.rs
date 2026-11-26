@@ -329,6 +329,14 @@ pub fn stop() -> Result<u32, String> {
             }
         }
         let _ = CloseHandle(snap);
+        // ★ 必须等它真的消失再返回（2026-11-26 真机：托盘勾选关不掉）。
+        //   TerminateProcess 只是"请求终止"，进程对象还要几十毫秒才真正退出；
+        //   调用方紧接着 is_running() 会读到 true ⇒ 菜单对勾又被打上，看起来"关了还在"。
+        let mut waited = 0u32;
+        while waited < 1500 && is_running() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            waited += 50;
+        }
         Ok(n)
     }
     #[cfg(not(target_os = "windows"))]
