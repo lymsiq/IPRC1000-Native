@@ -44,6 +44,7 @@ mod recorder;
 mod settings;
 mod shortcut_store;
 mod app_scenes;
+mod pet;
 mod region_learn;
 mod scene_play;
 mod ui_win32;
@@ -403,6 +404,7 @@ fn main() {
             || a == "--scene-focus-test"
             || a == "--keymap-dump"
             || a == "--scene-detect"
+            || a == "--pet"
     });
     if !is_cli_tool {
         redirect_stderr_to_file();
@@ -647,6 +649,33 @@ fn main() {
             let act = keymap::action_of(u);
             let vks = keymap::vks_of(u);
             eprintln!("  0x{u:02X} {label:<8} id={id:<12} action={act:?} vks={vks:?}");
+        }
+        use std::io::Write as _;
+        let _ = std::io::stderr().flush();
+        std::process::exit(0);
+    }
+
+    // 桌宠（KuroCat）控制：--pet start|stop|status
+    if let Some(i) = std::env::args().position(|a| a == "--pet") {
+        let act = std::env::args().nth(i + 1).unwrap_or_else(|| "status".into());
+        match act.as_str() {
+            "start" => {
+                let was = pet::is_running();
+                match pet::start() {
+                    Ok(true) if was => eprintln!("[桌宠] 本来就在运行"),
+                    Ok(true) => eprintln!("[桌宠] 已启动"),
+                    Ok(false) => eprintln!("[桌宠] 启动后未见进程"),
+                    Err(e) => eprintln!("[桌宠] {e}"),
+                }
+            }
+            "stop" => match pet::stop() {
+                Ok(n) => eprintln!("[桌宠] 已结束 {n} 个进程"),
+                Err(e) => eprintln!("[桌宠] {e}"),
+            },
+            _ => {
+                eprintln!("[桌宠] {}", if pet::is_running() { "运行中" } else { "未运行" });
+                eprintln!("  可执行文件：{:?}", pet::exe_path());
+            }
         }
         use std::io::Write as _;
         let _ = std::io::stderr().flush();
@@ -1363,6 +1392,14 @@ fn tray_thread() {
         autostart::is_enabled(),
         None,
     );
+    // ★ 桌宠（KuroCat）：勾选状态同样取自**进程真实状态**，不是我们记着的开关。
+    //   KuroCat 是单实例的，用户可能从别处开了一个 —— 菜单要如实反映。
+    let mi_pet = tray_icon::menu::CheckMenuItem::new(
+        "桌宠（KuroCat）",
+        true,
+        pet::is_running(),
+        None,
+    );
     let mi_cable = MenuItem::new("安装 / 修复虚拟声卡", true, None);
     let mi_driver = MenuItem::new("安装虚拟键盘驱动", true, None);
     // ★ "重启程序"：ETW 的 ACL 音频通道跑久了会停止投递（按键还正常），
@@ -1372,6 +1409,8 @@ fn tray_thread() {
     let _ = menu.append(&mi_show);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&mi_auto);
+    let _ = menu.append(&PredefinedMenuItem::separator());
+    let _ = menu.append(&mi_pet);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&mi_cable);
     let _ = menu.append(&mi_driver);
@@ -1487,6 +1526,23 @@ fn tray_thread() {
                         "设置失败（注册表不可写）"
                     }
                 );
+            }
+            if ev.id == mi_pet.id() {
+                // 勾选 = 想要它在跑。已勾着就关，未勾就起。
+                if pet::is_running() {
+                    match pet::stop() {
+                        Ok(n) => eprintln!("[桌宠] 已关闭（结束 {n} 个进程）"),
+                        Err(e) => eprintln!("[桌宠] 关闭失败：{e}"),
+                    }
+                } else {
+                    match pet::start() {
+                        Ok(true) => eprintln!("[桌宠] 已启动"),
+                        Ok(false) => eprintln!("[桌宠] 启动后未见进程（可能被安全软件拦截）"),
+                        Err(e) => eprintln!("[桌宠] {e}"),
+                    }
+                }
+                // 用真实状态回填，不用"我们想设成什么"
+                mi_pet.set_checked(pet::is_running());
             }
             if ev.id == mi_cable.id() {
                 std::thread::spawn(|| {

@@ -57,6 +57,9 @@ REQUIRED = [
     "assets/winuhid/driver/WinUHidDriver.inf",
     "assets/winuhid/driver/WinUHidDriver.cat",
     "assets/winuhid/driver/WinUHidDriver.dll",
+    # 桌宠（KuroCat，MIT）：托盘菜单「桌宠」依赖它；缺失 = 点了报"找不到"
+    "assets/pet/KuroCat.exe",
+    "assets/pet/LICENSE-KuroCat.txt",
 ] + ICONS
 
 # 绝不能再混进发行件的历史文件名（与源码查找名不一致 = 客户机必失败）
